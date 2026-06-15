@@ -3,3 +3,4 @@ download
 venv
 var
 .DS_Store
+private-key.pem

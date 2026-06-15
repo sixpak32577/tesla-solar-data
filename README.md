@@ -16,14 +16,13 @@ consider the [Netzero app](https://www.netzero.energy).
 
 ## Installation
 
-1. If needed, install Python 3 and git.
+1. If needed, install Python 3.10+ and git.
 2. Clone the repo:
     ```bash
     git clone https://github.com/netzero-labs/tesla-solar-download.git
     cd tesla-solar-download
     ```
-
-2. Install the package dependencies:
+3. Create a virtual environment and install the dependencies:
     ```bash
     python3 -m venv venv
     source venv/bin/activate
@@ -33,26 +32,149 @@ consider the [Netzero app](https://www.netzero.energy).
 
 Note: On Windows, run `venv\Scripts\activate` instead of `source venv/bin/activate`.
 
+You must activate the virtual environment (`source venv/bin/activate`) in each new
+terminal session before running any of the scripts below.
+
+## Authentication (Tesla Fleet API)
+
+Tesla has deprecated the legacy Owner API. If you run the downloader without a Fleet API
+client ID you will likely get a `403 forbidden` error. To fix this, register a free personal
+app on the Tesla developer portal and pass its client ID with `--client-id`.
+
+1. Go to [developer.tesla.com](https://developer.tesla.com), sign in, and create an app.
+   - Scopes: include `energy_device_data` (read-only energy data).
+   - Allowed Origin URL: a domain you control (e.g. a GitHub Pages site like
+     `https://yourusername.github.io`).
+   - Allowed Redirect URI: `https://auth.tesla.com/void/callback`
+   - Allowed Returned URL: leave empty.
+   - Copy the generated **Client ID** and **Client Secret**.
+2. Generate an EC key pair and host the public key on your domain:
+    ```bash
+    openssl ecparam -name prime256v1 -genkey -noout -out private-key.pem
+    openssl ec -in private-key.pem -pubout -out public-key.pem
+    ```
+   Host `public-key.pem` at exactly:
+   `https://<your-domain>/.well-known/appspecific/com.tesla.3p.public-key.pem`
+   (On GitHub Pages, add an empty `.nojekyll` file so the `.well-known` directory is served.)
+   Keep `private-key.pem` secret; it is git-ignored.
+3. Register your app with the Fleet API (one time, per region):
+    ```bash
+    source venv/bin/activate
+    python3 ./register_fleet_app.py \
+      --client-id YOUR_CLIENT_ID \
+      --client-secret YOUR_CLIENT_SECRET \
+      --domain yourusername.github.io
+    ```
+   Use `--region eu` or `--region cn` if you are outside North America/APAC.
+
 ## Usage
+
+Activate the virtual environment first:
+
 ```bash
 source venv/bin/activate
-python3 ./tesla_solar_download.py --email my_tesla_email@gmail.com
 ```
 
-Note: On Windows, run `venv\Scripts\activate` instead of `source venv/bin/activate`.
+Download all available data (power, energy, and battery state of charge):
 
-Follow the instructions to log in to Tesla with your web browser (this is needed to generate an API
-token, the credentials are only sent to Tesla).  Once you've logged in, the token will be stored
-locally so you can rerun the script if needed.
+```bash
+python3 ./tesla_solar_download.py --email my_tesla_email@gmail.com --client-id YOUR_CLIENT_ID
+```
 
-Data will start downloading to the `download` directory.  Starting with today and going back in time
-all the way to the Tesla system's installation date.
+Download only daily energy totals (skip 5-minute power and battery SoE):
 
-Power data downloads take ~1.5 seconds per day (~10 minutes per year of data).  This is mostly due
-to delays used to slow down the rate of API requests.  You may interrupt and restart the process
--- any CSV files that already exist will be skipped during the next run.
+```bash
+python3 ./tesla_solar_download.py --email my_tesla_email@gmail.com --client-id YOUR_CLIENT_ID --energy-only
+```
 
-Energy downloads are faster (less than 30s per year).
+Download a specific date range (inclusive). Defaults: start = installation date,
+end = today:
+
+```bash
+python3 ./tesla_solar_download.py --email my_tesla_email@gmail.com --client-id YOUR_CLIENT_ID \
+  --start-date 2025-01-01 --end-date 2025-12-31 --energy-only
+```
+
+Full list of options:
+
+| Option | Description |
+| --- | --- |
+| `--email` | Tesla account email address (required). |
+| `--client-id` | Fleet API client ID from developer.tesla.com (required unless the legacy Owner API still works for you). |
+| `--region` | Fleet API region: `na` (default), `eu`, or `cn`. |
+| `--energy-only` | Download only energy data; skip power and battery SoE. |
+| `--start-date` | Earliest date to download (`YYYY-MM-DD`). Defaults to the installation date. |
+| `--end-date` | Latest date to download (`YYYY-MM-DD`). Defaults to today. |
+| `--debug` | Print the resolved timezone and date range. |
+
+The first run opens a Tesla login in your browser to generate an API token (credentials are
+only sent to Tesla). After login, paste the resulting `https://auth.tesla.com/void/callback?...`
+URL back into the terminal. The token is stored in `cache.json` so subsequent runs reuse it.
+If you ever get an auth error, delete `cache.json` and run again.
+
+Data downloads to the `download` directory, starting with the most recent month/day and going
+back in time. You may interrupt and restart the process -- any CSV files that already exist are
+skipped on the next run.
+
+- Power/SoE data: ~1 API call per day (~1.5 seconds/day due to rate-limiting delays).
+- Energy data: also ~1 API call per day (uses `period=day` for accuracy that matches the
+  Tesla app), so expect roughly 6-9 minutes per year of energy history. A live `day N/total`
+  progress counter is shown while each month downloads.
+
+### Aggregate existing energy CSVs to one row per day
+
+```bash
+source venv/bin/activate
+python3 ./aggregate_energy_daily.py download/<site_id>/energy/
+```
+
+Pass one or more files, directories, or globs. Files are overwritten in place unless `-o` is used with a single input file.
+
+### Compare the Tesla app with API data for a single day
+
+```bash
+source venv/bin/activate
+python3 ./compare_energy_day.py --email my_tesla_email@gmail.com --date 2026-05-20
+```
+
+Use `--site-id` if you have more than one energy site. Values are shown in Wh and kWh (`kWh = Wh / 1000`).
+
+### Import a CSV into PostgreSQL
+
+Load a downloaded CSV file into a local PostgreSQL database. The table schema is derived from
+the CSV header, so it works for energy, power, and soe files. Rows are upserted on `timestamp`,
+so re-importing the same file is safe.
+
+```bash
+source venv/bin/activate
+python3 ./import_to_postgres.py download/<site_id>/energy/2025-12.csv
+```
+
+Import a whole folder with a shell loop:
+
+```bash
+for f in download/<site_id>/energy/*.csv; do
+  python3 ./import_to_postgres.py "$f"
+done
+```
+
+Connection settings default to the standard libpq environment variables (`PGHOST`, `PGPORT`,
+`PGDATABASE`, `PGUSER`, `PGPASSWORD`, `PGSCHEMA`) and can be overridden with flags:
+
+| Option | Description |
+| --- | --- |
+| `--table` | Target table name. Defaults to the data kind from the path (`energy`, `power`, or `soe`). |
+| `--schema` | Target schema. Defaults to `public`. Created if it does not exist. |
+| `--dbname` | Database name. Defaults to `postgres`. |
+| `--host` / `--port` | Server host/port. Default `localhost:5432`. |
+| `--user` / `--password` | Credentials (default to libpq env vars / current user). |
+| `--dsn` | Full libpq connection string, e.g. `postgresql://user:pass@host:5432/dbname` (overrides the other connection flags). |
+
+Example using a custom schema and database:
+
+```bash
+python3 ./import_to_postgres.py download/<site_id>/energy/2025-12.csv --dbname tesla --schema tesla_data
+```
 
 
 ## Data
@@ -75,11 +197,16 @@ timestamp,solar_power,battery_power,grid_power,load_power
 
 Energy data:
 `download/<site_id>/energy/2022-07.csv`
+
+- One CSV file per month.
+- Rows are aggregated to one row per calendar day (sub-daily API intervals are summed). The `timestamp` column is a date only (`YYYY-MM-DD`).
+- Energy values are in watt-hours (Wh).
+
 ```CSV
 timestamp,solar_energy_exported,grid_energy_imported,grid_energy_exported_from_solar,grid_energy_exported_from_battery,battery_energy_exported,battery_energy_imported_from_grid,battery_energy_imported_from_solar,consumer_energy_imported_from_grid,consumer_energy_imported_from_solar,consumer_energy_imported_from_battery
-2023-07-01 01:00:00,66700,6493.5,43456,0,16760,249.5,15640.5,6244,7603.5,16760
-2023-07-02 01:00:00,66780,6353,40874,0,14060,260,18510,6093,7396,14060
-2023-07-03 01:00:00,67380,6282,45964.5,0,10030,230,15580,6052,5835.5,10030
+2023-07-01,66700,6493.5,43456,0,16760,249.5,15640.5,6244,7603.5,16760
+2023-07-02,66780,6353,40874,0,14060,260,18510,6093,7396,14060
+2023-07-03,67380,6282,45964.5,0,10030,230,15580,6052,5835.5,10030
 [...]
 ```
 

@@ -4,6 +4,7 @@ decorator==5.2.1
 idna==3.14
 oauthlib==3.3.1
 packaging==26.2
+psycopg2-binary==2.9.12
 py==1.11.0
 python-dateutil==2.9.0.post0
 pytz==2026.2
